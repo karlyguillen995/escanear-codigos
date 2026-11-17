@@ -103,21 +103,37 @@
   }
 
   async function startCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus("Este navegador no permite usar la cámara. Usa HTTPS y Safari o Chrome actualizados.", "msg-err");
+      return false;
+    }
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 960 } },
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false
       });
     } catch (e) {
-      setStatus("No se pudo abrir la cámara. Revisa los permisos y que la página use HTTPS.", "msg-err");
-      return false;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      } catch (e2) {
+        setStatus("No se pudo abrir la cámara. Permite el acceso a la cámara en el navegador (Ajustes > Safari > Cámara).", "msg-err");
+        return false;
+      }
     }
     var v = $("video");
     v.setAttribute("playsinline", "");
+    v.setAttribute("muted", "");
+    v.muted = true;
     v.srcObject = stream;
     v.style.display = "block";
-    await v.play();
     $("btnStop").style.display = "block";
+    try {
+      await v.play();
+    } catch (e) {
+      setStatus("La cámara no pudo iniciar el video. Toca Escanear de nuevo.", "msg-err");
+      stopCamera();
+      return false;
+    }
     return true;
   }
 
@@ -145,19 +161,43 @@
     tick();
   }
 
+  // Lectura cuadro por cuadro con ZXing (iPhone y navegadores sin BarcodeDetector)
   function scanWithZXing() {
-    if (!window.ZXing) { setStatus("No se cargó el lector de respaldo. Revisa tu conexión.", "msg-err"); return; }
+    if (!window.ZXing) { setStatus("No se cargó el lector de respaldo. Revisa tu conexión y recarga la página.", "msg-err"); return; }
     var hints = new Map();
     hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.CODE_128]);
     hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-    var reader = new ZXing.BrowserMultiFormatReader(hints);
-    zxingReader = reader;
-    reader.decodeFromVideoElement($("video"), function (result, err) {
-      if (result && scanning) {
-        onDetected(result.getText(), String(result.getBarcodeFormat()).replace("BarcodeFormat.", ""));
-      }
-    }).catch(function () {});
+    var reader = new ZXing.MultiFormatReader();
+    reader.setHints(hints);
+    var v = $("video");
+    var canvas = document.createElement("canvas");
+    var g = canvas.getContext("2d", { willReadFrequently: true });
+    var lastT = 0;
     scanning = true;
+
+    function frame(t) {
+      if (!scanning) return;
+      rafId = requestAnimationFrame(frame);
+      if (t - lastT < 120) return;              // ~8 lecturas por segundo
+      lastT = t;
+      if (!v.videoWidth || v.readyState < 2) return;
+      // Recorte central para leer mejor (el código suele ir en el centro)
+      var vw = v.videoWidth, vh = v.videoHeight;
+      var cw = Math.round(vw * 0.9), ch = Math.round(vh * 0.6);
+      canvas.width = cw; canvas.height = ch;
+      g.drawImage(v, Math.round((vw - cw) / 2), Math.round((vh - ch) / 2), cw, ch, 0, 0, cw, ch);
+      try {
+        var source = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
+        var bitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(source));
+        var result = reader.decode(bitmap);
+        reader.reset();
+        onDetected(result.getText(), String(result.getBarcodeFormat()).replace("BarcodeFormat.", ""));
+      } catch (e) {
+        // NotFoundException: todavía no hay código en el cuadro; seguir
+        try { reader.reset(); } catch (e2) {}
+      }
+    }
+    rafId = requestAnimationFrame(frame);
   }
 
   $("btnScan").onclick = async function () {
@@ -171,14 +211,13 @@
         if (use.length) {
           detector = new BarcodeDetector({ formats: use });
           scanLoopBarcodeDetector();
-          setStatus("Apunta la cámara al código.");
+          setStatus("Apunta la cámara al código y espera a que se lea.");
           return;
         }
       } catch (e) {}
     }
-    // iPhone / Safari u otros: ZXing sobre el mismo video
     scanWithZXing();
-    setStatus("Apunta la cámara al código.");
+    setStatus("Apunta la cámara al código y espera a que se lea.");
   };
   $("btnStop").onclick = function () { stopCamera(); setStatus(""); };
 
